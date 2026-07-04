@@ -1,89 +1,74 @@
 import os
-from dotenv import load_dotenv
-import requests
 import time
+import requests
 import pandas as pd
-
-load_dotenv()
+import ta
+from datetime import datetime
 
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-SYMBOL = "BTCUSDT"
+MONEDAS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
-def send_telegram(message):
-    url = "https://api.telegram.org/bot" + TOKEN + "/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": message}
-    r = requests.post(url, data=data)
-    print("Estado:", r.status_code)
+def enviar_telegram(mensaje):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    data = {"chat_id": CHAT_ID, "text": mensaje}
+    requests.post(url, data=data)
 
-def get_klines():
-    # OJO: Esta es la API REAL. Para DEMO usa: https://testnet.binance.vision/api/v3/klines
-    url = "https://api.binance.com/api/v3/klines?symbol=" + SYMBOL + "&interval=5m&limit=50"
-    data = requests.get(url).json()
-    df = pd.DataFrame(data, columns=['time','o','h','l','c','v','x','q','n','t','Q','B'])
-    df[['o','h','l','c','v']] = df[['o','h','l','c','v']].astype(float)
-    return df
+def obtener_velas(symbol="BTCUSDT"):
+    try:
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=50"
+        data = requests.get(url, timeout=10).json()
+        if not data: 
+            return None
+        df = pd.DataFrame(data, columns=['time','open','high','low','close','volume','close_time','qav','trades','taker_base','taker_quote','ignore'])
+        df['close'] = df['close'].astype(float)
+        df['open'] = df['open'].astype(float)
+        return df
+    except:
+        return None
 
-def calcular_indicadores(df):
-    # RSI 14
-    delta = df['c'].diff()
-    gain = delta.where(delta > 0, 0).rolling(window=14).mean()
-    loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
-    rs = gain / loss
-    df['rsi'] = 100 - (100 / (1 + rs))
+def analizar(df, symbol):
+    if df is None or len(df) < 20:
+        return None
+        
+    df['rsi'] = ta.momentum.RSIIndicator(df['close']).rsi()
+    df['ema20'] = ta.trend.EMAIndicator(df['close'], 20).ema_indicator()
+    df['ema50'] = ta.trend.EMAIndicator(df['close'], 50).ema_indicator()
     
-    # Bandas de Bollinger 20
-    df['ma20'] = df['c'].rolling(window=20).mean()
-    df['std'] = df['c'].rolling(window=20).std()
-    df['bb_alta'] = df['ma20'] + (df['std'] * 2)
-    df['bb_baja'] = df['ma20'] - (df['std'] * 2)
+    df = df.dropna()
+    if len(df) < 3:
+        return None
     
-    # Volumen Promedio 20
-    df['vol_prom'] = df['v'].rolling(window=20).mean()
-    return df
-
-def detectar_patron_vela(df):
     ultima = df.iloc[-1]
-    anterior = df.iloc[-2]
-    # Martillo Alcista
-    cuerpo = abs(ultima['c'] - ultima['o'])
-    mecha_baja = min(ultima['o'], ultima['c']) - ultima['l']
-    if ultima['c'] > ultima['o'] and mecha_baja > cuerpo * 2:
-        return "MARTILLO ALCISTA"
-    return "NINGUNO"
-
-send_telegram("CENTINELA TRADER V1 ACTIVO\nBuscando Scalp LONG en BTC 5min")
+    ultimas_3 = df.tail(3)
+    
+    # LONG: RSI bajo + Tendencia alcista + Vela verde
+    long_cond = (ultima['rsi'] < 35) and (ultima['ema20'] > ultima['ema50']) and (ultima['close'] > ultima['open'])
+    
+    # SHORT: RSI alto + 3 velas rojas + Caída >1.5%
+    caida_pct = ((ultimas_3.iloc[-1]['close'] - ultimas_3.iloc[0]['open']) / ultimas_3.iloc[0]['open']) * 100
+    short_cond = (ultima['rsi'] > 65) and all(ultimas_3['close'] < ultimas_3['open']) and (caida_pct < -1.5)
+    
+    if long_cond:
+        return f"🚀 ALERTA LONG 🚀\nMoneda: {symbol}\nPrecio: ${ultima['close']:,.2f}\nRSI: {ultima['rsi']:.1f}\nEMA20 > EMA50"
+    
+    if short_cond:
+        return f"🔻 ALERTA SHORT 🔻\nMoneda: {symbol}\nPrecio: ${ultima['close']:,.2f}\nCaída 15min: {caida_pct:.2f}%"
+    
+    return None
 
 while True:
     try:
-        df = get_klines()
-        df = calcular_indicadores(df)
-        patron = detectar_patron_vela(df)
-        ultima = df.iloc[-1]
+        for moneda in MONEDAS:
+            df = obtener_velas(moneda)
+            alerta = analizar(df, moneda)
+            if alerta:
+                enviar_telegram(alerta)
+                time.sleep(10)
         
-        # FILTRO DE COMPRA: RSI Bajo + Toca BB Baja + Volumen Alto + Patron
-        compra = (ultima['rsi'] < 35 and 
-                  ultima['c'] < ultima['bb_baja'] and 
-                  ultima['v'] > ultima['vol_prom'] * 1.8 and
-                  patron != "NINGUNO")
-        
-        if compra:
-            sl = ultima['bb_baja'] * 0.998
-            tp = ultima['ma20']
-            
-            mensaje = "🚨 OPORTUNIDAD SCALP LONG 🚨\n\n"
-            mensaje = mensaje + "Precio: $" + str(round(ultima['c'],2)) + "\n"
-            mensaje = mensaje + "Patron: " + patron + "\n"
-            mensaje = mensaje + "RSI: " + str(round(ultima['rsi'],2)) + "\n"
-            mensaje = mensaje + "Vol: +" + str(round((ultima['v']/ultima['vol_prom']-1)*100,0)) + "%\n\n"
-            mensaje = mensaje + "SL: $" + str(round(sl,2)) + "\n"
-            mensaje = mensaje + "TP: $" + str(round(tp,2)) + "\n"
-            mensaje = mensaje + "RIESGO MAX: $1.5 USD"
-            send_telegram(mensaje)
-        
-        print("Vigilando... RSI:" + str(round(ultima['rsi'],1)) + " Precio:$" + str(round(ultima['c'],2)))
-        time.sleep(60) # Revisa cada 1 minuto
+        print(f"Vigilando OK... {datetime.now().strftime('%H:%M')}")
+        time.sleep(300)
         
     except Exception as e:
-        print("Error:", e)
+        print("Error general:", e)
         time.sleep(60)
