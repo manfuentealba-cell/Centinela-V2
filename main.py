@@ -57,18 +57,23 @@ def analizar(df, symbol):
     
     return None
 
+import time
+from datetime import datetime
+
 while True:
     try:
         for moneda in MONEDAS:
             df = obtener_velas(moneda)
             alerta = analizar(df, moneda)
             if alerta:
-                enviar_telegram(alerta)
+                enviar_telegrama(alerta)
                 time.sleep(10)
         
-        print(f"Vigilando OK... {datetime.now().strftime('%H:%M')}")
-        time.sleep(300)
+        ahora = datetime.now().strftime("%H:%M")
+        print(f"Vigilando OK... {ahora}") # Railway necesita ver esto cada minuto
         
+        time.sleep(60) # Espera 1 minuto. Asi Railway no lo mata
+
     except Exception as e:
-        print("Error general:", e)
+        print(f"Error general: {e}")
         time.sleep(60)
